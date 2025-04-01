@@ -48,25 +48,33 @@ def jamo_match(pattern, form):
     # 예: '최[ㅈ/*/*]'
     if "[" not in pattern or "]" not in pattern:
         return False
+
     prefix = pattern[:pattern.index("[")]
     jamo_parts = pattern[pattern.index("[")+1:pattern.index("]")].split("/")
+
     if len(jamo_parts) != 3:
         return False
+
     cho, jung, jong = jamo_parts
 
+    # prefix 다음 한 글자를 추출
     if not form.startswith(prefix):
         return False
+
     rest = form[len(prefix):]
-    if not rest:
+    if len(rest) == 0:
         return False
 
-    for char in rest:
-        c, j, g = decompose_syllable(char)
-        if ((cho == "*" or cho == c) and
-            (jung == "*" or jung == j) and
-            (jong == "*" or jong == g)):
-            return True
-    return False
+    # **바로 다음 글자 한 글자만 검사**
+    target = rest[0]
+    dc = decompose_syllable(target)
+
+    return (
+        (cho == "*" or cho == dc[0]) and
+        (jung == "*" or jung == dc[1]) and
+        (jong == "*" or jong == dc[2])
+    )
+
 
 # ----- 검색 실행 -----
 if uploaded_file and search_button and search_query:
