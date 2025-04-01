@@ -9,13 +9,12 @@ st.title("🔎 형태소 콘코던서 (Concordancer)")
 
 st.markdown("""
 **형태소 분석 결과 파일을 기반으로 정규표현식 검색, 자소 검색, KWIC 정렬이 가능한 형태소 콘코던서입니다.**  
-- 검색어 예: `하`, `.*다`, `[ㅎ/ㅏ/*]다`  
-- 정렬 위치, 품사 필터링, 자소 검색 기능을 함께 활용해보세요.
+- 검색어 예: `하`, `.*다`, `최[ㅈ/*/*]`  
+- 중심어는 파란색, 1L/1R은 빨간색, 2L/2R은 초록색, 3L/3R은 보라색으로 표시됩니다.
 """)
 
 kiwi = Kiwi()
 
-# --- 업로드 및 설정 영역 ---
 uploaded_file = st.file_uploader("📂 형태소 분석 결과 파일 (.txt, UTF-8)", type=["txt"])
 search_col1, search_col2 = st.columns([2, 1])
 with search_col1:
@@ -33,7 +32,7 @@ with col1:
 with col2:
     sort_mode = st.radio("정렬 기준", options=["빈도순", "가나다순"])
 
-# --- 자소 검색 처리 ---
+# ----- 자소 분리 함수 -----
 def decompose_syllable(syllable):
     code = ord(syllable) - 0xAC00
     if code < 0 or code > 11171:
@@ -44,42 +43,43 @@ def decompose_syllable(syllable):
     jongsung = chr(0x11A7 + jongsung_index) if jongsung_index else ''
     return (chosung, jungsung, jongsung)
 
-def jamo_match(query, word):
-    if not (query.startswith("[") and "]" in query):
+# ----- 자소 패턴 매칭 -----
+def jamo_match(pattern, form):
+    # 예: '최[ㅈ/*/*]'
+    if "[" not in pattern or "]" not in pattern:
         return False
-    parts = query[1:query.index("]")].split("/")
-    if len(parts) != 3:
+    prefix = pattern[:pattern.index("[")]
+    jamo_parts = pattern[pattern.index("[")+1:pattern.index("]")].split("/")
+    if len(jamo_parts) != 3:
         return False
-    cho, jung, jong = parts
-    for syl in word:
-        dc = decompose_syllable(syl)
-        if ((cho == "*" or cho == dc[0]) and
-            (jung == "*" or jung == dc[1]) and
-            (jong == "*" or jong == dc[2])):
+    cho, jung, jong = jamo_parts
+
+    if not form.startswith(prefix):
+        return False
+    rest = form[len(prefix):]
+    if not rest:
+        return False
+
+    for char in rest:
+        c, j, g = decompose_syllable(char)
+        if ((cho == "*" or cho == c) and
+            (jung == "*" or jung == j) and
+            (jong == "*" or jong == g)):
             return True
     return False
 
-def kwic_sort_key(entry, index):
-    try:
-        return entry[index]
-    except IndexError:
-        return ""
-
-# --- 검색 처리 ---
+# ----- 검색 실행 -----
 if uploaded_file and search_button and search_query:
     lines = uploaded_file.read().decode("utf-8").splitlines()
     results = []
-
     pos_filters = [p.strip() for p in pos_filter.split(",") if p.strip()]
 
     for line in lines:
         tokens = line.strip().split()
         for i, token in enumerate(tokens):
-            form_tag = token.split("/")
-            if len(form_tag) != 2:
+            if "/" not in token:
                 continue
-            form, tag = form_tag
-
+            form, tag = token.rsplit("/", 1)
             if pos_filters and tag not in pos_filters:
                 continue
 
@@ -99,11 +99,11 @@ if uploaded_file and search_button and search_query:
                 right = tokens[i + 1:i + 11]
                 results.append((left, center, right))
 
-    # 정렬
+    # ----- 정렬 -----
     sort_index_map = {
-        "3L": 0, "2L": 1, "1L": 2,
-        "C": 3,
-        "1R": 4, "2R": 5, "3R": 6
+        "3L": 7, "2L": 8, "1L": 9,
+        "C": 10,
+        "1R": 11, "2R": 12, "3R": 13
     }
 
     def flatten_kwic(result):
@@ -124,28 +124,33 @@ if uploaded_file and search_button and search_query:
     else:
         sorted_results.sort(key=lambda x: x[sort_idx])
 
-    # --- 결과 출력 ---
-    st.write(f"🔎 총 {len(sorted_results)}개 결과")
+    # ----- 색상 강조 표시 -----
+    color_map = {
+        7: "purple", 8: "green", 9: "red",
+        10: "blue",
+        11: "red", 12: "green", 13: "purple"
+    }
 
     def color_token(tok, idx):
-        if not tok or tok == "": return ""
-        if idx == 10:
-            return f"<span style='color:blue'><b>{tok}</b></span>"
-        elif 7 <= idx <= 9 or 11 <= idx <= 13:
-            return f"<span style='color:gray'>{tok}</span>"
-        else:
-            return tok
+        if not tok or tok == "":
+            return ""
+        color = color_map.get(idx)
+        if color:
+            return f"<span style='color:{color}'>{tok}</span>"
+        return tok
+
+    st.write(f"🔎 총 {len(sorted_results)}개 결과 (상위 100개 미리보기)")
 
     html_lines = []
     for row in sorted_results[:100]:
         colored = [color_token(row[i], i) for i in range(21)]
         html_lines.append(" ".join(colored))
 
-    st.markdown("<br>".join(html_lines), unsafe_allow_html=True)
+    st.markdown("<br><br>".join(html_lines), unsafe_allow_html=True)
 
-    # 다운로드용 텍스트
+    # 다운로드
     download_lines = ["\t".join(r) for r in sorted_results]
-    download_text = "\n".join(download_lines)
-    st.download_button("📥 결과 다운로드", download_text, file_name="concordance_result.txt")
+    st.download_button("📥 결과 다운로드", "\n".join(download_lines), file_name="concordance_result.txt")
+
 else:
     st.info("🔽 파일을 업로드하고 검색어를 입력한 뒤, [검색] 버튼을 눌러주세요.")
