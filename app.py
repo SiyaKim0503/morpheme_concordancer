@@ -1,35 +1,40 @@
 import streamlit as st
 import re
 from kiwipiepy import Kiwi
-from jamo import h2j, hangul_to_jamo
+from jamo import h2j
 from collections import Counter
 
-st.set_page_config(page_title="형태소 콘코던서", layout="wide")
+st.set_page_config(page_title="형태소 콘코던스", layout="wide")
 st.title("🔎 형태소 콘코던서 (Concordancer)")
 
 st.markdown("""
-**Kiwi 형태소 분석 결과 파일(.txt)을 업로드하여, 형태소 단위로 검색하고 문맥(KWIC) 정렬이 가능한 콘코던스 앱입니다.**  
-- **정규표현식 검색**을 지원합니다.  
-- **자소 검색**: `[초/중/종]` 형식으로 검색 가능하며, `*`은 와일드카드입니다. 예: `[*/*/ㅆ]다` → `갔다`, `봤다` 등  
-- **정렬 기능**: 중심어 좌/우 형태소 기준 정렬, 빈도순 또는 가나다순
-
-**파일 형식 예시**:
-오늘/NNG 날씨/NNG 가/JKS 좋/VA 다/EF ./SF 기계/NNG 는/JX 언어/NNG 를/JKO 이해/NNG 하/XSV ㅂ니다/EF ./SF
+**형태소 분석 결과 파일을 기반으로 정규표현식 검색, 자소 검색, KWIC 정렬이 가능한 형태소 콘코던서입니다.**  
+- 검색어 예: `하`, `.*다`, `[ㅎ/ㅏ/*]다`  
+- 정렬 위치, 품사 필터링, 자소 검색 기능을 함께 활용해보세요.
 """)
 
+kiwi = Kiwi()
+
+# --- 업로드 및 설정 영역 ---
 uploaded_file = st.file_uploader("📂 형태소 분석 결과 파일 (.txt, UTF-8)", type=["txt"])
-regex_mode = st.checkbox("🔤 정규표현식 검색 사용")
-jamo_mode = st.checkbox("🧩 자소 검색 사용")
-search_query = st.text_input("검색어 입력", "")
+search_col1, search_col2 = st.columns([2, 1])
+with search_col1:
+    search_query = st.text_input("검색어 입력", "")
+with search_col2:
+    search_button = st.button("🔍 검색")
+
+regex_mode = st.checkbox("🔤 정규표현식 검색", value=False)
+jamo_mode = st.checkbox("🧩 자소 검색", value=False)
+pos_filter = st.text_input("🎯 품사 필터 (예: VV, NNG, JKS 등 / 쉼표로 구분)", "")
 
 col1, col2 = st.columns([1, 1])
 with col1:
-    sort_pos = st.selectbox("정렬 위치 (KWIC 기준)", options=["1L", "2L", "3L", "C", "1R", "2R", "3R"])
+    sort_pos = st.selectbox("정렬 위치", options=["3L", "2L", "1L", "C", "1R", "2R", "3R"])
 with col2:
-    sort_mode = st.radio("정렬 방식", options=["빈도순", "가나다순"])
+    sort_mode = st.radio("정렬 기준", options=["빈도순", "가나다순"])
 
+# --- 자소 검색 처리 ---
 def decompose_syllable(syllable):
-    # 한 글자를 초/중/종 분해
     code = ord(syllable) - 0xAC00
     if code < 0 or code > 11171:
         return (syllable, '', '')
@@ -40,15 +45,13 @@ def decompose_syllable(syllable):
     return (chosung, jungsung, jongsung)
 
 def jamo_match(query, word):
-    """query: [초/중/종] with * support"""
     if not (query.startswith("[") and "]" in query):
         return False
     parts = query[1:query.index("]")].split("/")
     if len(parts) != 3:
         return False
     cho, jung, jong = parts
-    for i in range(len(word) - 1):
-        syl = word[i]
+    for syl in word:
         dc = decompose_syllable(syl)
         if ((cho == "*" or cho == dc[0]) and
             (jung == "*" or jung == dc[1]) and
@@ -62,9 +65,12 @@ def kwic_sort_key(entry, index):
     except IndexError:
         return ""
 
-if uploaded_file and search_query:
+# --- 검색 처리 ---
+if uploaded_file and search_button and search_query:
     lines = uploaded_file.read().decode("utf-8").splitlines()
     results = []
+
+    pos_filters = [p.strip() for p in pos_filter.split(",") if p.strip()]
 
     for line in lines:
         tokens = line.strip().split()
@@ -73,8 +79,11 @@ if uploaded_file and search_query:
             if len(form_tag) != 2:
                 continue
             form, tag = form_tag
-            matched = False
 
+            if pos_filters and tag not in pos_filters:
+                continue
+
+            matched = False
             if jamo_mode:
                 matched = jamo_match(search_query, form)
             elif regex_mode:
@@ -85,12 +94,12 @@ if uploaded_file and search_query:
                     matched = True
 
             if matched:
-                left = tokens[max(0, i - 3):i]
+                left = tokens[max(0, i - 10):i]
                 center = tokens[i]
-                right = tokens[i + 1:i + 4]
+                right = tokens[i + 1:i + 11]
                 results.append((left, center, right))
 
-    # 정렬 기준 위치 지정
+    # 정렬
     sort_index_map = {
         "3L": 0, "2L": 1, "1L": 2,
         "C": 3,
@@ -98,35 +107,45 @@ if uploaded_file and search_query:
     }
 
     def flatten_kwic(result):
-        full = [''] * 7
+        full = [''] * 21
         left, center, right = result
         for j in range(len(left)):
-            full[2 - j] = left[-(j+1)]
-        full[3] = center
+            full[10 - len(left) + j] = left[j]
+        full[10] = center
         for j in range(len(right)):
-            full[4 + j] = right[j]
+            full[11 + j] = right[j]
         return full
 
     sorted_results = [flatten_kwic(r) for r in results]
-    sort_idx = sort_index_map.get(sort_pos, 3)
+    sort_idx = sort_index_map.get(sort_pos, 10)
     if sort_mode == "빈도순":
         count = Counter([r[sort_idx] for r in sorted_results])
         sorted_results.sort(key=lambda x: -count[x[sort_idx]])
     else:
         sorted_results.sort(key=lambda x: x[sort_idx])
 
+    # --- 결과 출력 ---
     st.write(f"🔎 총 {len(sorted_results)}개 결과")
 
-    table = []
-    for row in sorted_results[:100]:  # 최대 100개까지만 화면 출력
-        table.append([row[i] if row[i] else " " for i in range(7)])
-    
-    st.table(table)
+    def color_token(tok, idx):
+        if not tok or tok == "": return ""
+        if idx == 10:
+            return f"<span style='color:blue'><b>{tok}</b></span>"
+        elif 7 <= idx <= 9 or 11 <= idx <= 13:
+            return f"<span style='color:gray'>{tok}</span>"
+        else:
+            return tok
 
-    # 전체 텍스트 다운로드
+    html_lines = []
+    for row in sorted_results[:100]:
+        colored = [color_token(row[i], i) for i in range(21)]
+        html_lines.append(" ".join(colored))
+
+    st.markdown("<br>".join(html_lines), unsafe_allow_html=True)
+
+    # 다운로드용 텍스트
     download_lines = ["\t".join(r) for r in sorted_results]
     download_text = "\n".join(download_lines)
     st.download_button("📥 결과 다운로드", download_text, file_name="concordance_result.txt")
 else:
-    st.info("📌 텍스트 파일을 업로드하고 검색어를 입력하세요.")
-    
+    st.info("🔽 파일을 업로드하고 검색어를 입력한 뒤, [검색] 버튼을 눌러주세요.")
