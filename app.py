@@ -1,164 +1,105 @@
 import streamlit as st
 import re
-from kiwipiepy import Kiwi
-from jamo import h2j
-from collections import Counter
 
-st.set_page_config(page_title="형태소 콘코던스", layout="wide")
-st.title("🔎 형태소 콘코던서 (Concordancer)")
+# 자모 리스트
+CHOSUNG_LIST = [chr(x) for x in range(0x1100, 0x1113)]
+JUNGSUNG_LIST = [chr(x) for x in range(0x1161, 0x1176)]
+JONGSUNG_LIST = [None] + [chr(x) for x in range(0x11A8, 0x11C3)]
 
-st.markdown("""
-**형태소 분석 결과 파일을 기반으로 정규표현식 검색, 자소 검색, KWIC 정렬이 가능한 형태소 콘코던서입니다.**  
-- 검색어 예: `하`, `.*다`, `최[ㅈ/*/*]`  
-- 중심어는 파란색, 1L/1R은 빨간색, 2L/2R은 초록색, 3L/3R은 보라색으로 표시됩니다.
-""")
+compat_to_modern = {
+    'ㄱ': 'ᄀ', 'ㄲ': 'ᄁ', 'ㄴ': 'ᄂ', 'ㄷ': 'ᄃ', 'ㄸ': 'ᄄ', 'ㄹ': 'ᄅ',
+    'ㅁ': 'ᄆ', 'ㅂ': 'ᄇ', 'ㅃ': 'ᄈ', 'ㅅ': 'ᄉ', 'ㅆ': 'ᄊ', 'ㅇ': 'ᄋ',
+    'ㅈ': 'ᄌ', 'ㅉ': 'ᄍ', 'ㅊ': 'ᄎ', 'ㅋ': 'ᄏ', 'ㅌ': 'ᄐ', 'ㅍ': 'ᄑ', 'ㅎ': 'ᄒ',
+    'ㅏ': 'ᅡ', 'ㅐ': 'ᅢ', 'ㅑ': 'ᅣ', 'ㅒ': 'ᅤ', 'ㅓ': 'ᅥ', 'ㅔ': 'ᅦ', 'ㅕ': 'ᅧ',
+    'ㅖ': 'ᅨ', 'ㅗ': 'ᅩ', 'ㅛ': 'ᅭ', 'ㅜ': 'ᅮ', 'ㅠ': 'ᅲ', 'ㅡ': 'ᅳ', 'ㅣ': 'ᅵ',
+    'ㅘ': 'ᅪ', 'ㅙ': 'ᅫ', 'ㅚ': 'ᅬ', 'ㅝ': 'ᅯ', 'ㅞ': 'ᅰ', 'ㅟ': 'ᅱ', 'ㅢ': 'ᅴ'
+}
 
-kiwi = Kiwi()
+def convert_to_modern(jamo):
+    return compat_to_modern.get(jamo, jamo)
 
-uploaded_file = st.file_uploader("📂 형태소 분석 결과 파일 (.txt, UTF-8)", type=["txt"])
-search_col1, search_col2 = st.columns([2, 1])
-with search_col1:
-    search_query = st.text_input("검색어 입력", "")
-with search_col2:
-    search_button = st.button("🔍 검색")
+def split_jamo(char):
+    BASE = 0xAC00
+    CHOSUNG = 588
+    JUNGSUNG = 28
+    if not ('가' <= char <= '힣'):
+        return char, None, None
+    code = ord(char) - BASE
+    cho = code // CHOSUNG
+    jung = (code % CHOSUNG) // JUNGSUNG
+    jong = (code % CHOSUNG) % JUNGSUNG
+    return CHOSUNG_LIST[cho], JUNGSUNG_LIST[jung], JONGSUNG_LIST[jong]
 
-regex_mode = st.checkbox("🔤 정규표현식 검색", value=False)
-jamo_mode = st.checkbox("🧩 자소 검색", value=False)
-pos_filter = st.text_input("🎯 품사 필터 (예: VV, NNG, JKS 등 / 쉼표로 구분)", "")
+def parse_pattern(pattern):
+    m = re.match(r"(.*?)\[(\*|[^\]/])/(*|[^\]/])/(*|[^\]/])\](.*)", pattern)
+    if not m:
+        raise ValueError("패턴 형식이 잘못되었습니다. 예: 최[ㅈ/*/*], [ㅎ/*/*]다 등")
+    pre, cho, jung, jong, post = m.groups()
+    return pre, convert_to_modern(cho), convert_to_modern(jung), convert_to_modern(jong), post
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    sort_pos = st.selectbox("정렬 위치", options=["3L", "2L", "1L", "C", "1R", "2R", "3R"])
-with col2:
-    sort_mode = st.radio("정렬 기준", options=["빈도순", "가나다순"])
-
-# ----- 자소 분리 함수 -----
-def decompose_syllable(syllable):
-    code = ord(syllable) - 0xAC00
-    if code < 0 or code > 11171:
-        return (syllable, '', '')
-    chosung = chr(0x1100 + code // 588)
-    jungsung = chr(0x1161 + (code % 588) // 28)
-    jongsung_index = code % 28
-    jongsung = chr(0x11A7 + jongsung_index) if jongsung_index else ''
-    return (chosung, jungsung, jongsung)
-
-# ----- 자소 패턴 매칭 -----
-def jamo_match(pattern, form):
-    # 예: '최[ㅈ/*/*]'
-    if "[" not in pattern or "]" not in pattern:
+def match_with_jamo(word, pre, cho_pat, jung_pat, jong_pat, post):
+    idx = len(pre)
+    if not word.startswith(pre) or not word.endswith(post):
         return False
-
-    prefix = pattern[:pattern.index("[")]
-    jamo_parts = pattern[pattern.index("[")+1:pattern.index("]")].split("/")
-
-    if len(jamo_parts) != 3:
+    if len(word) <= idx:
         return False
+    target_char = word[idx]
+    c, j, jj = split_jamo(target_char)
 
-    cho, jung, jong = jamo_parts
+    def match(jamo, pattern):
+        return pattern == '*' or (jamo == pattern)
 
-    # prefix 다음 한 글자를 추출
-    if not form.startswith(prefix):
-        return False
+    return match(c, cho_pat) and match(j, jung_pat) and (jong_pat == '*' or match(jj, jong_pat))
 
-    rest = form[len(prefix):]
-    if len(rest) == 0:
-        return False
+def style(word, index):
+    styles = {
+        0: "<span style='color:blue; font-weight:bold'>",  # 중심어
+        1: "<span style='color:red'>",
+        2: "<span style='color:green'>",
+        3: "<span style='color:purple'>"
+    }
+    reset = "</span>"
+    color = styles.get(index, "")
+    return f"{color}{word}{reset}"
 
-    # **바로 다음 글자 한 글자만 검사**
-    target = rest[0]
-    dc = decompose_syllable(target)
-
-    return (
-        (cho == "*" or cho == dc[0]) and
-        (jung == "*" or jung == dc[1]) and
-        (jong == "*" or jong == dc[2])
-    )
-
-
-# ----- 검색 실행 -----
-if uploaded_file and search_button and search_query:
-    lines = uploaded_file.read().decode("utf-8").splitlines()
+def get_kwic(lines, pattern, context_size=10, sort='left'):
+    pre, cho, jung, jong, post = parse_pattern(pattern)
     results = []
-    pos_filters = [p.strip() for p in pos_filter.split(",") if p.strip()]
-
     for line in lines:
-        tokens = line.strip().split()
-        for i, token in enumerate(tokens):
-            if "/" not in token:
-                continue
-            form, tag = token.rsplit("/", 1)
-            if pos_filters and tag not in pos_filters:
-                continue
-
-            matched = False
-            if jamo_mode:
-                matched = jamo_match(search_query, form)
-            elif regex_mode:
-                if re.search(search_query, form):
-                    matched = True
-            else:
-                if search_query in form:
-                    matched = True
-
-            if matched:
-                left = tokens[max(0, i - 10):i]
-                center = tokens[i]
-                right = tokens[i + 1:i + 11]
+        words = line.strip().split()
+        for i, word in enumerate(words):
+            if match_with_jamo(word, pre, cho, jung, jong, post):
+                left = words[max(0, i - context_size):i]
+                right = words[i+1:i+1+context_size]
+                center = word
                 results.append((left, center, right))
 
-    # ----- 정렬 -----
-    sort_index_map = {
-        "3L": 7, "2L": 8, "1L": 9,
-        "C": 10,
-        "1R": 11, "2R": 12, "3R": 13
-    }
+    if sort == 'left':
+        results.sort(key=lambda x: x[0][-1] if x[0] else '')
+    elif sort == 'right':
+        results.sort(key=lambda x: x[2][0] if x[2] else '')
 
-    def flatten_kwic(result):
-        full = [''] * 21
-        left, center, right = result
-        for j in range(len(left)):
-            full[10 - len(left) + j] = left[j]
-        full[10] = center
-        for j in range(len(right)):
-            full[11 + j] = right[j]
-        return full
+    display = []
+    for left, center, right in results:
+        left_str = ' '.join([style(w, len(left)-i) for i, w in enumerate(left)]) if left else ''
+        right_str = ' '.join([style(w, i+1) for i, w in enumerate(right)]) if right else ''
+        display.append(f"{left_str} {style(center, 0)} {right_str}")
+    return display
 
-    sorted_results = [flatten_kwic(r) for r in results]
-    sort_idx = sort_index_map.get(sort_pos, 10)
-    if sort_mode == "빈도순":
-        count = Counter([r[sort_idx] for r in sorted_results])
-        sorted_results.sort(key=lambda x: -count[x[sort_idx]])
-    else:
-        sorted_results.sort(key=lambda x: x[sort_idx])
+# Streamlit 인터페이스
+st.title("🔍 자소 기반 KWIC 검색기")
 
-    # ----- 색상 강조 표시 -----
-    color_map = {
-        7: "purple", 8: "green", 9: "red",
-        10: "blue",
-        11: "red", 12: "green", 13: "purple"
-    }
+uploaded_file = st.file_uploader("텍스트 파일 업로드", type=["txt"])
+pattern = st.text_input("자소 패턴 (예: 최[ㅈ/*/*] 또는 [ㅎ/*/*]다)")
+sort = st.radio("정렬 기준", options=["left", "right"], index=0)
 
-    def color_token(tok, idx):
-        if not tok or tok == "":
-            return ""
-        color = color_map.get(idx)
-        if color:
-            return f"<span style='color:{color}'>{tok}</span>"
-        return tok
-
-    st.write(f"🔎 총 {len(sorted_results)}개 결과 (상위 100개 미리보기)")
-
-    html_lines = []
-    for row in sorted_results[:100]:
-        colored = [color_token(row[i], i) for i in range(21)]
-        html_lines.append(" ".join(colored))
-
-    st.markdown("<br><br>".join(html_lines), unsafe_allow_html=True)
-
-    # 다운로드
-    download_lines = ["\t".join(r) for r in sorted_results]
-    st.download_button("📥 결과 다운로드", "\n".join(download_lines), file_name="concordance_result.txt")
-
-else:
-    st.info("🔽 파일을 업로드하고 검색어를 입력한 뒤, [검색] 버튼을 눌러주세요.")
+if uploaded_file and pattern:
+    lines = uploaded_file.getvalue().decode('utf-8-sig').splitlines()
+    try:
+        results = get_kwic(lines, pattern, context_size=10, sort=sort)
+        st.markdown("---")
+        st.markdown(f"총 {len(results)}건 결과")
+        for line in results:
+            st.markdown(line, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(str(e))
